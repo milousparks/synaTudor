@@ -44,16 +44,27 @@ void wdf_evtqueue_enqueue(struct wdf_object *obj, wdf_evtqueue_action_fnc *actio
     act->object = obj;
     act->action = action;
 
-    //Enqueue action
+    //Enqueue action into both the global queue and the object's own list while
+    //holding queue_mutex for the whole operation. Previously queue_mutex was
+    //released between the two insertions, leaving a window where a concurrent
+    //winwdf_event_queue_flush() on another thread could run to completion and
+    //destroy `obj` (pthread_mutex_destroy'ing obj->evtqueue_lock and free()'ing
+    //obj) before this thread locked obj->evtqueue_lock below - causing
+    //pthread_mutex_lock to fail on an already-destroyed mutex ('Invalid
+    //argument') and abort() via cant_fail_ret. Holding queue_mutex across both
+    //steps serializes this against winwdf_event_queue_flush(), which also holds
+    //queue_mutex for its entire loop (including the destroy call), closing that
+    //race for any object destroyed via the queue (WdfObjectDelete).
     if(!flushing_queue) cant_fail_ret(pthread_mutex_lock(&queue_mutex));
     act->next = queue_head;
     queue_head = act;
-    if(!flushing_queue) cant_fail_ret(pthread_mutex_unlock(&queue_mutex));
 
     cant_fail_ret(pthread_mutex_lock(&obj->evtqueue_lock));
     act->obj_next = obj->evtqueue_acts_head;
     obj->evtqueue_acts_head = act;
     cant_fail_ret(pthread_mutex_unlock(&obj->evtqueue_lock));
+
+    if(!flushing_queue) cant_fail_ret(pthread_mutex_unlock(&queue_mutex));
 }
 
 void wdf_evtqueue_clear_obj(struct wdf_object *obj) {
